@@ -67,11 +67,17 @@ internal static class Converter
         string convertedCore = KeyMapper.ConvertWord(core, targetHkl);
         if (convertedCore.Length == 0) return false;
         string originalCore = KeyMapper.ConvertWord(core, sourceHkl);  // as it was typed
+        if (originalCore.Length == 0) return false;                    // nothing on screen to replace
 
         string converted = convertedCore + suf;
         string original = originalCore + suf;
 
-        TextInjector.Replace(backspaces: coreCount + suf.Length, text: converted);
+        // Delete as many CHARACTERS as the word actually has, not as many KEYS as were pressed. A dead
+        // key contributes no character of its own — on the Greek layout the `;` key is the tonos and
+        // composes with the next vowel (`;`+`a` → ά: two keys, one character on screen), so
+        // `coreCount` over-counts and would eat a character before the word. `originalCore` is the
+        // buffer rendered in the CURRENT layout, i.e. what is really on screen.
+        TextInjector.Replace(backspaces: originalCore.Length + suf.Length, text: converted);
         LayoutSwitcher.SwitchTo(targetHkl);
 
         _aText = converted; _aHkl = targetHkl;   // now on screen

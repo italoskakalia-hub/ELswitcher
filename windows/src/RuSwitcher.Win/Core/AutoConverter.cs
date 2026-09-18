@@ -13,9 +13,9 @@ internal static class AutoConverter
 {
     /// <summary>Try to auto-convert a completed word. Runs on the message loop (NOT inside the LL-hook
     /// callback) AFTER the real Space has already been delivered to the app — so it deletes the word
-    /// PLUS that trailing space (<paramref name="keys"/>.Count + 1 backspaces) and re-types the
-    /// converted word followed by a space. Deferring off the hook thread keeps the callback O(1) and
-    /// avoids the LowLevelHooksTimeout / silent-unhook trap (COM + SendInput must not run in-callback).
+    /// PLUS that trailing space and re-types the converted word followed by a space. Deferring off
+    /// the hook thread keeps the callback O(1) and avoids the LowLevelHooksTimeout / silent-unhook
+    /// trap (COM + SendInput must not run in-callback).
     /// Returns true if it converted; on "keep" it does nothing (the word + space stay as typed).</summary>
     public static bool TryConvertWord(IReadOnlyList<TypedKey> keys)
     {
@@ -34,7 +34,12 @@ internal static class AutoConverter
 
         if (!ShouldConvert(typed, converted, srcTag, tgtTag, caps)) return false;
 
-        TextInjector.Replace(backspaces: keys.Count + 1, text: converted + " ");
+        // Delete as many CHARACTERS as the word actually has (+1 for the trailing space), not as many
+        // KEYS as were pressed. A dead key produces no character of its own — on the Greek layout the
+        // `;` key is the tonos and composes with the next vowel (`;`+`a` → ά: two keys, one character
+        // on screen), so `keys.Count` over-counts and would eat a character before the word.
+        // `typed` is the buffer rendered in the CURRENT layout, i.e. exactly what is on screen.
+        TextInjector.Replace(backspaces: typed.Length + 1, text: converted + " ");
         LayoutSwitcher.SwitchTo(targetHkl);
         Converter.NoteAutoConversion(converted, typed, targetHkl, sourceHkl);
         return true;
@@ -63,7 +68,7 @@ internal static class AutoConverter
 
         // --- soft vetoes (cheap, before the dictionary) ---
         if (typed.Length < 3) return false;                 // 1–2 letters: too many cross-layout collisions
-        if (!typed.All(char.IsLetter)) return false;        // digits / punctuation / URL / code / email
+        if (!IsWordShaped(typed, converted)) return false;  // digits / punctuation / URL / code / email
         if (!caps)                                          // under Caps Lock these two aren't acronyms/camelCase
         {
             if (IsAllCaps(typed)) return false;             // acronyms
@@ -95,22 +100,44 @@ internal static class AutoConverter
         return true;
     }
 
+    /// <summary>Is this token shaped like a single word (as opposed to a URL / code / number)?
+    ///
+    /// All letters is the easy yes. The hard case is a layout where a letter key produces
+    /// PUNCTUATION on the other side: on the Greek layout the EN `Q` key is `;`, so "query" typed in
+    /// Greek arrives as ";θερυ" — word-shaped, but the plain all-letters test rejected it and such
+    /// words never auto-converted. A semicolon in the MIDDLE of a token is never intentional, so the
+    /// token is accepted when its flipped image is a clean all-letter word.
+    ///
+    /// A non-letter TAIL stays vetoed, because there the two readings are genuinely ambiguous: on the
+    /// Russian layout the EN `.` key is the letter «ю», so "levf." is either «думаю» or «дума.» — that
+    /// call belongs to the user's manual trigger, not to the auto-converter (and "ab12", "example.com"
+    /// and "1.5" are all still rejected, since their flipped image keeps the digits/dots).</summary>
+    private static bool IsWordShaped(string typed, string converted)
+    {
+        if (typed.All(char.IsLetter)) return true;
+        if (typed.Length == 0 || !char.IsLetter(typed[^1])) return false;  // ambiguous tail — keep
+        return converted.Length > 0 && converted.All(char.IsLetter);
+    }
+
     private static bool IsAllCaps(string s) =>
         s == s.ToUpperInvariant() && s != s.ToLowerInvariant();
 
     /// <summary>Looks like a code identifier: an internal capital (camelCase/PascalCase) or a mix of
-    /// Latin and Cyrillic in one token — almost always code, not a word.</summary>
+    /// Latin and a non-Latin script in one token — almost always code, not a word. Cyrillic and Greek
+    /// both count: "manualΤρίγγερ" is as much an identifier as "myПеременная".</summary>
     private static bool LooksLikeCode(string s)
     {
         for (int i = 1; i < s.Length; i++)
             if (char.IsUpper(s[i])) return true;
 
-        bool latin = false, cyr = false;
+        bool latin = false, nonLatin = false;
         foreach (char c in s)
         {
             if (c is >= 'a' and <= 'z' or >= 'A' and <= 'Z') latin = true;
-            else if (c is >= 'Ѐ' and <= 'ӿ') cyr = true;
+            else if (c is >= 'Ѐ' and <= 'ӿ') nonLatin = true;                 // Cyrillic
+            else if (c is >= '\u0370' and <= '\u03FF') nonLatin = true;       // Greek and Coptic
+            else if (c is >= '\u1F00' and <= '\u1FFF') nonLatin = true;       // Greek Extended (polytonic)
         }
-        return latin && cyr;
+        return latin && nonLatin;
     }
 }
